@@ -1,0 +1,31 @@
+import React from 'react';
+
+export function ActionRunner() { return null; }
+export function ActiveRuns() { return null; }
+export function AgentRunner() { return null; }
+export function AppBridge() { return null; }
+export function AppRegistry() { return null; }
+export function ChatAgentRegistry() { return null; }
+export function ChatSessionRegistry() { return null; }
+export function ChatTabs() { return null; }
+export function DiffBlocks() { return null; }
+export function GatewayTranscript() { return null; }
+export function ObjectFilters() { return null; }
+export function ParseTags() { return null; }
+export function ReportBlocks() { return null; }
+export function ReportFilters() { return null; }
+export function ReportUtils() { return null; }
+export function SearchIndex() { return null; }
+export function SubagentRegistry() { return null; }
+export function SubagentRuns() { return null; }
+export function TabState() { return null; }
+export function Telemetry() { return null; }
+export function TerminalServer() { return null; }
+export function WorkspaceBootstrapTemplates() { return null; }
+export function WorkspaceCellFormat() { return null; }
+export function WorkspaceLinks() { return null; }
+export function WorkspacePaths() { return null; }
+export function WorkspaceProfiles() { return null; }
+export function WorkspaceSeed() { return null; }
+export function WorkspaceUrlState() { return null; }
+export function Workspace() { return null; }

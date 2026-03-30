@@ -1,0 +1,5 @@
+{
+  "name": "Umbrella Workspace",
+  "description": "A fully managed CRM, AI Outreach Agent, and Productivity workspace built with React and Gemini.",
+  "requestFramePermissions": ["microphone"]
+}
