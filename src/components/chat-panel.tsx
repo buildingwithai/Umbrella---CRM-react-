@@ -1,8 +1,52 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Bot, User, Mic, Square, Loader2 } from 'lucide-react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Type, FunctionDeclaration } from '@google/genai';
+import { useWorkspace } from '../lib/workspace-context';
+
+const tools: FunctionDeclaration[] = [
+  {
+    name: "createFile",
+    description: "Create a new file in the knowledge base.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        title: { type: Type.STRING, description: "The name of the file" },
+        type: { type: Type.STRING, description: "The type of the file: 'markdown', 'code', or 'spreadsheet'" },
+        content: { type: Type.STRING, description: "The initial content of the file" }
+      },
+      required: ["title", "type", "content"]
+    }
+  },
+  {
+    name: "readFile",
+    description: "Read the content of a file in the knowledge base.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        title: { type: Type.STRING, description: "The name of the file to read" }
+      },
+      required: ["title"]
+    }
+  },
+  {
+    name: "createAgent",
+    description: "Create a new dedicated AI agent or sub-agent.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        name: { type: Type.STRING, description: "The name of the agent" },
+        role: { type: Type.STRING, description: "The role or title of the agent (e.g., 'Lead Generator')" },
+        instructions: { type: Type.STRING, description: "The system instructions or prompt for the agent" }
+      },
+      required: ["name", "role", "instructions"]
+    }
+  }
+];
 
 export function ChatPanel() {
+  const { chatHistory, addChatMessage, addFile, addAgent, setActiveFile, setActiveAgent, files } = useWorkspace();
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const [isCalling, setIsCalling] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   
@@ -10,6 +54,130 @@ export function ChatPanel() {
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const nextPlayTimeRef = useRef<number>(0);
+  const filesRef = useRef(files);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory]);
+
+  const handleSendText = async () => {
+    if (!input.trim() || isLoading) return;
+    
+    const userMessage = input;
+    addChatMessage('user', userMessage);
+    setInput('');
+    setIsLoading(true);
+    
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      
+      const contents: any[] = chatHistory.map(msg => ({
+        role: msg.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: msg.content }]
+      }));
+      contents.push({ role: 'user', parts: [{ text: userMessage }] });
+
+      let response = await ai.models.generateContent({
+        model: "gemini-3.1-flash-preview",
+        contents,
+        config: {
+          systemInstruction: "You are Umbrella, a helpful AI assistant in a workspace environment. You can create files, read files, and create dedicated AI agents. Always be concise.",
+          tools: [{ functionDeclarations: tools }, { googleSearch: {} }],
+          toolConfig: { includeServerSideToolInvocations: true }
+        }
+      });
+
+      let finalResponseText = response.text || '';
+      
+      if (response.functionCalls && response.functionCalls.length > 0) {
+        const functionResponses = [];
+        let actionMessages = '';
+
+        for (const call of response.functionCalls) {
+          if (call.name === 'createFile') {
+            const { title, type, content } = call.args as any;
+            const newFile = addFile(title, type, content);
+            setActiveFile(newFile.id);
+            functionResponses.push({
+              id: call.id,
+              name: call.name,
+              response: { success: true, message: `Created file ${title}` }
+            });
+            actionMessages += `\n\n*Created file: ${title}*`;
+          } else if (call.name === 'createAgent') {
+            const { name, role, instructions } = call.args as any;
+            const newAgent = addAgent(name, role, instructions);
+            setActiveAgent(newAgent.id);
+            functionResponses.push({
+              id: call.id,
+              name: call.name,
+              response: { success: true, message: `Created agent ${name}` }
+            });
+            actionMessages += `\n\n*Created agent: ${name}*`;
+          } else if (call.name === 'readFile') {
+            const { title } = call.args as any;
+            const file = filesRef.current.find(f => f.title.toLowerCase() === title.toLowerCase());
+            if (file) {
+              functionResponses.push({
+                id: call.id,
+                name: call.name,
+                response: { success: true, content: file.content }
+              });
+              actionMessages += `\n\n*Read file: ${title}*`;
+            } else {
+              functionResponses.push({
+                id: call.id,
+                name: call.name,
+                response: { success: false, error: `File ${title} not found` }
+              });
+              actionMessages += `\n\n*Could not find file: ${title}*`;
+            }
+          }
+        }
+
+        if (functionResponses.length > 0) {
+          // Append the model's tool call turn
+          contents.push(response.candidates![0].content);
+          
+          // Append the tool response turn
+          contents.push({
+            role: 'user',
+            parts: functionResponses.map(fr => ({
+              functionResponse: fr
+            }))
+          });
+
+          // Call the model again
+          response = await ai.models.generateContent({
+            model: "gemini-3.1-flash-preview",
+            contents,
+            config: {
+              systemInstruction: "You are Umbrella, a helpful AI assistant in a workspace environment. You can create files, read files, and create dedicated AI agents. Always be concise.",
+              tools: [{ functionDeclarations: tools }, { googleSearch: {} }],
+              toolConfig: { includeServerSideToolInvocations: true }
+            }
+          });
+
+          finalResponseText = (response.text || '') + actionMessages;
+        }
+      }
+
+      if (finalResponseText) {
+        addChatMessage('assistant', finalResponseText);
+      }
+
+    } catch (error) {
+      console.error(error);
+      addChatMessage('assistant', "Sorry, I encountered an error processing your request.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const startCall = async () => {
     setIsConnecting(true);
@@ -84,6 +252,44 @@ export function ChatPanel() {
                 nextPlayTimeRef.current = audioContextRef.current.currentTime;
               }
             }
+
+            if (message.serverContent?.modelTurn?.parts) {
+              for (const part of message.serverContent.modelTurn.parts) {
+                if (part.functionCall) {
+                  const call = part.functionCall;
+                  let response = {};
+                  if (call.name === 'createFile') {
+                    const { title, type, content } = call.args as any;
+                    const newFile = addFile(title, type, content);
+                    setActiveFile(newFile.id);
+                    response = { success: true, message: `Created file ${title}` };
+                  } else if (call.name === 'createAgent') {
+                    const { name, role, instructions } = call.args as any;
+                    const newAgent = addAgent(name, role, instructions);
+                    setActiveAgent(newAgent.id);
+                    response = { success: true, message: `Created agent ${name}` };
+                  } else if (call.name === 'readFile') {
+                    const { title } = call.args as any;
+                    const file = filesRef.current.find(f => f.title.toLowerCase() === title.toLowerCase());
+                    if (file) {
+                      response = { success: true, content: file.content };
+                    } else {
+                      response = { success: false, error: `File ${title} not found` };
+                    }
+                  }
+                  
+                  sessionPromise.then(session => {
+                    session.sendToolResponse({
+                      functionResponses: [{
+                        id: call.id,
+                        name: call.name,
+                        response: response
+                      }]
+                    });
+                  });
+                }
+              }
+            }
           },
           onclose: () => {
             endCall();
@@ -94,7 +300,8 @@ export function ChatPanel() {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }
           },
-          systemInstruction: "You are Umbrella, a helpful AI assistant in a workspace environment. Keep your answers concise and conversational."
+          systemInstruction: "You are Umbrella, a helpful AI assistant in a workspace environment. You can create files, read files, and create dedicated AI agents. Keep your answers concise and conversational.",
+          tools: [{ functionDeclarations: tools }]
         }
       });
     } catch (err) {
@@ -127,26 +334,52 @@ export function ChatPanel() {
   }, []);
 
   return (
-    <div className="w-80 flex flex-col bg-zinc-950 border-l border-zinc-800 flex-shrink-0">
+    <div className="w-full h-full flex flex-col bg-zinc-950">
       <div className="h-12 flex items-center px-4 border-b border-zinc-800 font-medium text-sm">
-        AI Assistant
+        Umbrella AI
       </div>
       
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
-        <ChatMessage role="assistant" content="Hello! I'm your Umbrella assistant. How can I help you with your workspace today?" />
-        <ChatMessage role="user" content="Can you help me draft an email to a new contact?" />
-        <ChatMessage role="assistant" content="Absolutely. Please open the Contacts table and select the person you'd like to email, or just tell me their name and some context." />
+        {chatHistory.map(msg => (
+          <ChatMessage key={msg.id} role={msg.role} content={msg.content} />
+        ))}
+        {isLoading && (
+          <div className="flex gap-3">
+            <div className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 bg-blue-900/50 text-blue-400">
+              <Bot size={16} />
+            </div>
+            <div className="flex flex-col items-start">
+              <span className="text-xs text-zinc-500 mb-1">Umbrella AI</span>
+              <div className="px-3 py-2 rounded-lg text-sm bg-zinc-900 border border-zinc-800 text-zinc-300">
+                <Loader2 size={14} className="animate-spin" />
+              </div>
+            </div>
+          </div>
+        )}
+        <div ref={chatEndRef} />
       </div>
       
       <div className="p-4 border-t border-zinc-800">
         <div className="relative flex items-end gap-2">
           <textarea 
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSendText();
+              }
+            }}
             className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500/50 resize-none min-h-[40px] max-h-[120px]"
             placeholder="Ask anything..."
             rows={1}
           />
           <div className="flex flex-col gap-2">
-            <button className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors flex items-center justify-center shadow-sm">
+            <button 
+              onClick={handleSendText}
+              disabled={isLoading || !input.trim()}
+              className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 disabled:opacity-50 disabled:hover:bg-blue-600 transition-colors flex items-center justify-center shadow-sm"
+            >
               <Send size={16} />
             </button>
             <button 
@@ -188,9 +421,9 @@ function ChatMessage({ role, content }: { role: 'user' | 'assistant', content: s
       <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${isUser ? 'bg-zinc-800' : 'bg-blue-900/50 text-blue-400'}`}>
         {isUser ? <User size={16} /> : <Bot size={16} />}
       </div>
-      <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+      <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[85%]`}>
         <span className="text-xs text-zinc-500 mb-1">{isUser ? 'You' : 'Umbrella AI'}</span>
-        <div className={`px-3 py-2 rounded-lg text-sm ${isUser ? 'bg-zinc-800 text-zinc-100' : 'bg-zinc-900 border border-zinc-800 text-zinc-300'}`}>
+        <div className={`px-3 py-2 rounded-lg text-sm whitespace-pre-wrap ${isUser ? 'bg-zinc-800 text-zinc-100' : 'bg-zinc-900 border border-zinc-800 text-zinc-300'}`}>
           {content}
         </div>
       </div>
